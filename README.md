@@ -1,6 +1,6 @@
-# Motion Rush
+# Motion Rush V2
 
-A mobile-first endless runner controlled by body movement through the phone's front camera. The game also supports swipes, on-screen buttons, and keyboard controls.
+A mobile-first endless runner controlled by body movement through the phone's front camera. V2 adds absolute three-zone lane mapping, continuous camera-held crouching, and a low-latency armed jump model. The game also supports swipes, on-screen buttons, and keyboard controls.
 
 ## Run it on Replit
 
@@ -14,7 +14,7 @@ On iPhone, open the published HTTPS URL in Safari. Use **Share → Add to Home S
 ## Controls
 
 - Swipe or arrow keys / WASD: move left, right, jump, and slide.
-- Body camera: step or lean left/right, pop upward to jump, and duck to slide.
+- Body camera: your horizontal position maps directly to the left, center, or right lane; pop upward to jump and stay ducked to remain crouched.
 - `P` or `Escape`: pause.
 
 ## Camera notes

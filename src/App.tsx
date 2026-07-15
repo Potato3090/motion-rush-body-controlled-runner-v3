@@ -29,7 +29,7 @@ import {
   Zap,
 } from 'lucide-react'
 import GameStage, { type GameStageHandle } from './components/GameStage'
-import type { ControlMode, GameSnapshot, GameStatus, RunnerAction } from './game/types'
+import type { ControlMode, GameSnapshot, GameStatus, RunnerAction, RunnerLane } from './game/types'
 import { usePoseControls } from './hooks/usePoseControls'
 
 const EMPTY_SNAPSHOT: GameSnapshot = { score: 0, coins: 0, distance: 0, speed: 19, multiplier: 1 }
@@ -82,7 +82,23 @@ function App() {
     stageRef.current?.action(action)
   }, [])
 
-  const pose = usePoseControls({ onAction: performAction })
+  const setCameraLane = useCallback((lane: RunnerLane) => {
+    stageRef.current?.setCameraLane(lane)
+  }, [])
+
+  const setCameraCrouching = useCallback((crouching: boolean) => {
+    stageRef.current?.setCameraCrouching(crouching)
+  }, [])
+
+  const performCameraJump = useCallback(() => {
+    stageRef.current?.action('jump')
+  }, [])
+
+  const pose = usePoseControls({
+    onLaneTarget: setCameraLane,
+    onCrouchChange: setCameraCrouching,
+    onJump: performCameraJump,
+  })
 
   const onCoin = useCallback(() => {
     playTone(880, 0.085, 'sine', 0.035)
@@ -127,7 +143,11 @@ function App() {
         ArrowLeft: 'left', a: 'left', A: 'left',
         ArrowRight: 'right', d: 'right', D: 'right',
         ArrowUp: 'jump', w: 'jump', W: 'jump', ' ': 'jump',
-        ArrowDown: 'slide', s: 'slide', S: 'slide',
+      }
+      if (event.key === 'ArrowDown' || event.key.toLowerCase() === 's') {
+        event.preventDefault()
+        stageRef.current?.setManualCrouching(true)
+        return
       }
       const action = actions[event.key]
       if (action) {
@@ -138,8 +158,17 @@ function App() {
         setStatus((current) => current === 'playing' ? 'paused' : current === 'paused' ? 'playing' : current)
       }
     }
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowDown' || event.key.toLowerCase() === 's') {
+        stageRef.current?.setManualCrouching(false)
+      }
+    }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
   }, [performAction])
 
   useEffect(() => {
@@ -275,7 +304,9 @@ function App() {
               </div>
               <div className="camera-status-line">
                 <span>{pose.message}</span>
-                {cameraIsActive && <b>{Math.round(pose.signal.confidence * 100)}%</b>}
+                {cameraIsActive && (
+                  <b>{['LEFT', 'CENTER', 'RIGHT'][pose.signal.lane]} · {Math.round(pose.signal.confidence * 100)}%</b>
+                )}
               </div>
               {pose.error && <p className="camera-error">{pose.error}</p>}
               {(status === 'menu' || status === 'paused') && cameraButton.action && (
@@ -395,7 +426,15 @@ function App() {
           <button onPointerDown={() => performAction('left')} aria-label="Move left"><ArrowLeft /></button>
           <div>
             <button onPointerDown={() => performAction('jump')} aria-label="Jump"><ArrowUp /></button>
-            <button onPointerDown={() => performAction('slide')} aria-label="Slide"><ArrowDown /></button>
+            <button
+              onPointerDown={(event) => {
+                event.currentTarget.setPointerCapture(event.pointerId)
+                stageRef.current?.setManualCrouching(true)
+              }}
+              onPointerUp={() => stageRef.current?.setManualCrouching(false)}
+              onPointerCancel={() => stageRef.current?.setManualCrouching(false)}
+              aria-label="Hold to crouch"
+            ><ArrowDown /></button>
           </div>
           <button onPointerDown={() => performAction('right')} aria-label="Move right"><ArrowRight /></button>
         </div>
@@ -408,14 +447,14 @@ function App() {
             <p className="modal-kicker">QUICK START</p>
             <h2 id="how-title">Your body is the controller.</h2>
             <div className="move-grid">
-              <div><ArrowLeft /><b>STEP LEFT</b><span>Move one lane left</span></div>
-              <div><ArrowRight /><b>STEP RIGHT</b><span>Move one lane right</span></div>
+              <div><ArrowLeft /><b>MOVE LEFT</b><span>Your position selects the left lane</span></div>
+              <div><ArrowRight /><b>MOVE RIGHT</b><span>Your position selects the right lane</span></div>
               <div><ArrowUp /><b>POP UP</b><span>Jump over barriers</span></div>
               <div><ArrowDown /><b>DUCK</b><span>Slide under signs</span></div>
             </div>
             <div className="setup-tips">
               <h3><Settings2 size={17} /> BEST CAMERA SETUP</h3>
-              <p>Prop your phone up, step back until shoulders and hips are visible, then hold a relaxed stance while calibrating. Bright, even light works best.</p>
+              <p>Prop your phone up, step back until shoulders and hips are visible, then hold a relaxed center stance while calibrating. Your live horizontal position maps directly to the three lanes.</p>
             </div>
             <p className="fallback-tip"><Hand size={16} /> Swipes, arrow keys, and the on-screen buttons always work as backup controls.</p>
             <button className="primary-button compact" onClick={() => setShowHowTo(false)}><Check size={18} /><b>GOT IT</b></button>

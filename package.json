@@ -1,11 +1,12 @@
 {
-  "name": "motion-rush",
+  "name": "motion-rush-v2",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:controls": "tsc src/game/poseControlModel.ts --outDir .control-test-build --target ES2022 --module ES2022 --moduleResolution Bundler --skipLibCheck && node tests/poseControlModel.mjs",
     "start": "vite preview --host 0.0.0.0 --port 3000",
     "preview": "vite preview"
   },

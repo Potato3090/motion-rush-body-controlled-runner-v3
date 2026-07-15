@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { GameSnapshot, GameStatus, RunnerAction } from './types'
+import type { GameSnapshot, GameStatus, RunnerAction, RunnerLane } from './types'
 
 type HazardKind = 'block' | 'jump' | 'slide'
 
@@ -79,11 +79,13 @@ export class RunnerEngine {
 
   private animationFrame = 0
   private status: GameStatus = 'menu'
-  private laneIndex = 1
+  private laneIndex: RunnerLane = 1
   private targetX = 0
   private verticalVelocity = 0
   private jumpHeight = 0
-  private slideTimer = 0
+  private fallbackSlideTimer = 0
+  private cameraCrouching = false
+  private manualCrouching = false
   private elapsed = 0
   private distance = 0
   private coinCount = 0
@@ -117,6 +119,11 @@ export class RunnerEngine {
 
   setStatus(status: GameStatus) {
     this.status = status
+    if (status === 'menu') {
+      this.cameraCrouching = false
+      this.manualCrouching = false
+      this.fallbackSlideTimer = 0
+    }
     if (status === 'playing') this.clock.getDelta()
   }
 
@@ -130,7 +137,9 @@ export class RunnerEngine {
     this.targetX = 0
     this.jumpHeight = 0
     this.verticalVelocity = 0
-    this.slideTimer = 0
+    this.fallbackSlideTimer = 0
+    this.cameraCrouching = false
+    this.manualCrouching = false
     this.player.position.set(0, 0, PLAYER_Z)
     this.player.scale.set(1, 1, 1)
     this.player.rotation.set(0, 0, 0)
@@ -142,22 +151,44 @@ export class RunnerEngine {
     if (this.status !== 'playing') return
 
     if (action === 'left') {
-      this.laneIndex = Math.max(0, this.laneIndex - 1)
+      this.laneIndex = Math.max(0, this.laneIndex - 1) as RunnerLane
       this.targetX = LANES[this.laneIndex]
       return
     }
     if (action === 'right') {
-      this.laneIndex = Math.min(2, this.laneIndex + 1)
+      this.laneIndex = Math.min(2, this.laneIndex + 1) as RunnerLane
       this.targetX = LANES[this.laneIndex]
       return
     }
-    if (action === 'jump' && this.jumpHeight <= 0.02 && this.slideTimer <= 0) {
+    if (action === 'jump' && this.jumpHeight <= 0.02 && !this.isCrouching()) {
       this.verticalVelocity = 10.8
       return
     }
     if (action === 'slide' && this.jumpHeight <= 0.12) {
-      this.slideTimer = 0.72
+      this.fallbackSlideTimer = 0.72
     }
+  }
+
+  /** Camera input sets an absolute destination and may replace it mid-transition. */
+  setTargetLane(lane: RunnerLane) {
+    if (this.status !== 'playing' && this.status !== 'countdown') return
+    this.laneIndex = lane
+    this.targetX = LANES[lane]
+  }
+
+  /** Camera crouching is a held state. There is intentionally no timeout. */
+  setCameraCrouching(crouching: boolean) {
+    if (this.status !== 'playing' && this.status !== 'countdown') return
+    this.cameraCrouching = crouching
+  }
+
+  /** Pointer/keyboard hold support; swipe-down still uses the timed fallback. */
+  setManualCrouching(crouching: boolean) {
+    if (this.status !== 'playing') {
+      this.manualCrouching = false
+      return
+    }
+    this.manualCrouching = crouching
   }
 
   destroy() {
@@ -534,8 +565,8 @@ export class RunnerEngine {
 
   private updatePlayer(delta: number) {
     const xDelta = this.targetX - this.player.position.x
-    this.player.position.x += xDelta * Math.min(1, delta * 12.5)
-    this.player.rotation.z = THREE.MathUtils.lerp(this.player.rotation.z, -xDelta * 0.07, Math.min(1, delta * 13))
+    this.player.position.x += xDelta * Math.min(1, delta * 17.5)
+    this.player.rotation.z = THREE.MathUtils.lerp(this.player.rotation.z, -xDelta * 0.07, Math.min(1, delta * 18))
 
     if (this.jumpHeight > 0 || this.verticalVelocity > 0) {
       this.verticalVelocity -= 25.5 * delta
@@ -543,8 +574,8 @@ export class RunnerEngine {
       if (this.jumpHeight === 0) this.verticalVelocity = 0
     }
 
-    this.slideTimer = Math.max(0, this.slideTimer - delta)
-    const sliding = this.slideTimer > 0
+    this.fallbackSlideTimer = Math.max(0, this.fallbackSlideTimer - delta)
+    const sliding = this.isCrouching()
     const targetScaleY = sliding ? 0.48 : 1
     this.player.scale.y = THREE.MathUtils.lerp(this.player.scale.y, targetScaleY, Math.min(1, delta * 18))
     this.player.position.y = this.jumpHeight
@@ -568,7 +599,7 @@ export class RunnerEngine {
       const zDistance = Math.abs(hazard.group.position.z - PLAYER_Z)
       const xDistance = Math.abs(LANES[hazard.lane] - playerX)
       if (zDistance < 1.36 && xDistance < 1.08) {
-        const sliding = this.slideTimer > 0.08
+        const sliding = this.isCrouching()
         const safe =
           (hazard.kind === 'jump' && this.jumpHeight > 1.0) ||
           (hazard.kind === 'slide' && sliding)
@@ -610,6 +641,10 @@ export class RunnerEngine {
 
   private emitSnapshot() {
     this.options.onSnapshot(this.getSnapshot())
+  }
+
+  private isCrouching() {
+    return this.cameraCrouching || this.manualCrouching || this.fallbackSlideTimer > 0
   }
 
   private resize = () => {

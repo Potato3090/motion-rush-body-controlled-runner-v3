@@ -1,9 +1,12 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 import { RunnerEngine } from '../game/RunnerEngine'
-import type { GameSnapshot, GameStatus, RunnerAction } from '../game/types'
+import type { GameSnapshot, GameStatus, RunnerAction, RunnerLane } from '../game/types'
 
 export interface GameStageHandle {
   action: (action: RunnerAction) => void
+  setCameraLane: (lane: RunnerLane) => void
+  setCameraCrouching: (crouching: boolean) => void
+  setManualCrouching: (crouching: boolean) => void
   reset: () => void
 }
 
@@ -47,6 +50,9 @@ const GameStage = forwardRef<GameStageHandle, GameStageProps>(function GameStage
 
   useImperativeHandle(ref, () => ({
     action: (action) => engineRef.current?.action(action),
+    setCameraLane: (lane) => engineRef.current?.setTargetLane(lane),
+    setCameraCrouching: (crouching) => engineRef.current?.setCameraCrouching(crouching),
+    setManualCrouching: (crouching) => engineRef.current?.setManualCrouching(crouching),
     reset: () => engineRef.current?.start(),
   }), [])
 

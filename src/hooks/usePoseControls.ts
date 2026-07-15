@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PoseLandmarker as PoseLandmarkerInstance } from '@mediapipe/tasks-vision'
-import type { CalibrationBaseline, PoseSignal, RunnerAction } from '../game/types'
+import {
+  adaptivePoseSmooth,
+  resolveAbsoluteLane,
+  updateCrouchGate,
+  updateJumpGate,
+  type JumpGateState,
+} from '../game/poseControlModel'
+import type { CalibrationBaseline, PoseSignal, RunnerLane } from '../game/types'
 
 export type CameraStatus = 'off' | 'requesting' | 'ready' | 'calibrating' | 'active' | 'error'
 
@@ -12,12 +19,16 @@ interface Landmark {
 }
 
 interface UsePoseControlsOptions {
-  onAction: (action: RunnerAction) => void
+  onLaneTarget: (lane: RunnerLane) => void
+  onCrouchChange: (crouching: boolean) => void
+  onJump: () => void
 }
 
 const WASM_ROOT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task'
+const CALIBRATION_MS = 1200
+const TRACKING_LOSS_RELEASE_FRAMES = 4
 
 const CONNECTIONS: Array<[number, number]> = [
   [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
@@ -25,11 +36,17 @@ const CONNECTIONS: Array<[number, number]> = [
   [24, 26], [26, 28],
 ]
 
+const LANE_LABELS = ['LEFT LANE', 'CENTER LANE', 'RIGHT LANE'] as const
+
 function average(values: number[]) {
   return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length)
 }
 
-export function usePoseControls({ onAction }: UsePoseControlsOptions) {
+export function usePoseControls({
+  onLaneTarget,
+  onCrouchChange,
+  onJump,
+}: UsePoseControlsOptions) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -37,23 +54,36 @@ export function usePoseControls({ onAction }: UsePoseControlsOptions) {
   const frameRef = useRef(0)
   const statusRef = useRef<CameraStatus>('off')
   const baselineRef = useRef<CalibrationBaseline | null>(null)
-  const smoothRef = useRef<{ x: number; y: number } | null>(null)
+  const filteredRef = useRef<{ x: number; y: number; at: number } | null>(null)
   const calibrationRef = useRef<{ started: number; x: number[]; y: number[] } | null>(null)
-  const horizontalArmedRef = useRef(true)
-  const verticalArmedRef = useRef(true)
-  const lastActionRef = useRef(0)
+  const laneRef = useRef<RunnerLane>(1)
+  const crouchingRef = useRef(false)
+  const crouchEnterFramesRef = useRef(0)
+  const jumpGateRef = useRef<JumpGateState>({ armed: true, neutralFrames: 0 })
+  const unreliableFramesRef = useRef(0)
   const lastUiUpdateRef = useRef(0)
-  const onActionRef = useRef(onAction)
+  const onLaneTargetRef = useRef(onLaneTarget)
+  const onCrouchChangeRef = useRef(onCrouchChange)
+  const onJumpRef = useRef(onJump)
 
   const [status, setStatusState] = useState<CameraStatus>('off')
   const [message, setMessage] = useState('Camera is off')
   const [error, setError] = useState<string | null>(null)
   const [calibrationProgress, setCalibrationProgress] = useState(0)
-  const [signal, setSignal] = useState<PoseSignal>({ x: 0, y: 0, confidence: 0, action: null })
+  const [signal, setSignal] = useState<PoseSignal>({
+    x: 0,
+    y: 0,
+    confidence: 0,
+    lane: 1,
+    crouching: false,
+    jumpTriggered: false,
+  })
 
   useEffect(() => {
-    onActionRef.current = onAction
-  }, [onAction])
+    onLaneTargetRef.current = onLaneTarget
+    onCrouchChangeRef.current = onCrouchChange
+    onJumpRef.current = onJump
+  }, [onLaneTarget, onCrouchChange, onJump])
 
   const setStatus = useCallback((next: CameraStatus) => {
     statusRef.current = next
@@ -101,111 +131,183 @@ export function usePoseControls({ onAction }: UsePoseControlsOptions) {
     context.restore()
   }, [])
 
-  const interpretPose = useCallback((landmarks: Landmark[], now: number) => {
+  const publishTrackingLoss = useCallback((confidence: number, now: number) => {
+    unreliableFramesRef.current += 1
+    if (
+      unreliableFramesRef.current >= TRACKING_LOSS_RELEASE_FRAMES &&
+      crouchingRef.current
+    ) {
+      crouchingRef.current = false
+      crouchEnterFramesRef.current = 0
+      onCrouchChangeRef.current(false)
+    }
+
+    if (now - lastUiUpdateRef.current > 140) {
+      lastUiUpdateRef.current = now
+      setMessage('Step back so I can see your shoulders and hips')
+      setSignal((current) => ({
+        ...current,
+        confidence,
+        crouching: crouchingRef.current,
+        jumpTriggered: false,
+      }))
+    }
+  }, [])
+
+  const interpretPose = useCallback((landmarks: Landmark[] | undefined, now: number) => {
     const indices = [11, 12, 23, 24]
-    if (indices.some((index) => !landmarks[index])) return
-    const confidence = average(indices.map((index) => landmarks[index].visibility ?? 1))
-    if (confidence < 0.48) {
-      if (now - lastUiUpdateRef.current > 180) {
-        lastUiUpdateRef.current = now
-        setMessage('Step back so I can see your shoulders and hips')
-        setSignal((current) => ({ ...current, confidence, action: null }))
-      }
+    if (!landmarks || indices.some((index) => !landmarks[index])) {
+      publishTrackingLoss(0, now)
       return
     }
+
+    const confidence = average(indices.map((index) => landmarks[index].visibility ?? 1))
+    if (confidence < 0.5) {
+      publishTrackingLoss(confidence, now)
+      return
+    }
+    unreliableFramesRef.current = 0
 
     const rawCenterX = average(indices.map((index) => landmarks[index].x))
     const mirroredCenterX = 1 - rawCenterX
     const shoulderY = average([landmarks[11].y, landmarks[12].y])
-    const previous = smoothRef.current
-    const smoothed = previous
-      ? { x: previous.x * 0.72 + mirroredCenterX * 0.28, y: previous.y * 0.72 + shoulderY * 0.28 }
-      : { x: mirroredCenterX, y: shoulderY }
-    smoothRef.current = smoothed
+    const previous = filteredRef.current
+    const deltaSeconds = previous ? (now - previous.at) / 1000 : 1 / 30
+    const filtered = previous
+      ? {
+          x: adaptivePoseSmooth(previous.x, mirroredCenterX, deltaSeconds, {
+            minAlpha: 0.46,
+            maxAlpha: 0.9,
+            fullSpeed: 0.72,
+            deadband: 0.0014,
+          }),
+          y: adaptivePoseSmooth(previous.y, shoulderY, deltaSeconds, {
+            minAlpha: 0.42,
+            maxAlpha: 0.86,
+            fullSpeed: 0.72,
+            deadband: 0.0012,
+          }),
+          at: now,
+        }
+      : { x: mirroredCenterX, y: shoulderY, at: now }
+    filteredRef.current = filtered
 
     if (statusRef.current === 'calibrating') {
       const calibration = calibrationRef.current
       if (!calibration) return
-      calibration.x.push(smoothed.x)
-      calibration.y.push(smoothed.y)
-      const progress = Math.min(1, (now - calibration.started) / 1800)
-      if (now - lastUiUpdateRef.current > 80) {
+      calibration.x.push(filtered.x)
+      calibration.y.push(filtered.y)
+      const progress = Math.min(1, (now - calibration.started) / CALIBRATION_MS)
+      if (now - lastUiUpdateRef.current > 66) {
         lastUiUpdateRef.current = now
         setCalibrationProgress(progress)
         setMessage(progress < 0.98 ? 'Hold your neutral running stance…' : 'Locked in!')
       }
-      if (progress >= 1 && calibration.x.length > 12) {
+      if (progress >= 1 && calibration.x.length > 8) {
         baselineRef.current = {
-          centerX: average(calibration.x.slice(-45)),
-          shoulderY: average(calibration.y.slice(-45)),
+          centerX: average(calibration.x.slice(-30)),
+          shoulderY: average(calibration.y.slice(-30)),
         }
-        horizontalArmedRef.current = true
-        verticalArmedRef.current = true
+        laneRef.current = 1
+        crouchingRef.current = false
+        crouchEnterFramesRef.current = 0
+        jumpGateRef.current = { armed: true, neutralFrames: 0 }
         calibrationRef.current = null
+        onLaneTargetRef.current(1)
+        onCrouchChangeRef.current(false)
         setCalibrationProgress(1)
+        setSignal({
+          x: 0,
+          y: 0,
+          confidence,
+          lane: 1,
+          crouching: false,
+          jumpTriggered: false,
+        })
         setStatus('active')
-        setMessage('Body controls active')
+        setMessage('CENTER LANE')
       }
       return
     }
 
     const baseline = baselineRef.current
-    let action: RunnerAction | null = null
-    let deltaX = 0
-    let deltaY = 0
-    if (statusRef.current === 'active' && baseline) {
-      deltaX = smoothed.x - baseline.centerX
-      deltaY = smoothed.y - baseline.shoulderY
-      const cooldownPassed = now - lastActionRef.current > 430
+    if (statusRef.current !== 'active' || !baseline) return
 
-      if (Math.abs(deltaX) < 0.035) horizontalArmedRef.current = true
-      if (Math.abs(deltaY) < 0.035) verticalArmedRef.current = true
+    const deltaX = filtered.x - baseline.centerX
+    const deltaY = filtered.y - baseline.shoulderY
+    const previousLane = laneRef.current
+    const nextLane = resolveAbsoluteLane(deltaX, previousLane)
+    const laneChanged = nextLane !== previousLane
+    laneRef.current = nextLane
 
-      if (cooldownPassed && horizontalArmedRef.current && Math.abs(deltaX) > 0.072) {
-        action = deltaX > 0 ? 'right' : 'left'
-        horizontalArmedRef.current = false
-      } else if (cooldownPassed && verticalArmedRef.current && deltaY < -0.058) {
-        action = 'jump'
-        verticalArmedRef.current = false
-      } else if (cooldownPassed && verticalArmedRef.current && deltaY > 0.074) {
-        action = 'slide'
-        verticalArmedRef.current = false
-      }
+    // This is deliberately sent on every reliable pose frame. The engine treats
+    // it as an idempotent absolute destination, not as a queued lane command.
+    onLaneTargetRef.current(nextLane)
 
-      if (action) {
-        lastActionRef.current = now
-        onActionRef.current(action)
-        setMessage(action === 'slide' ? 'DUCK' : action.toUpperCase())
-      } else if (now - lastUiUpdateRef.current > 160) {
-        setMessage('Body controls active')
-      }
+    const wasCrouching = crouchingRef.current
+    const crouchResult = updateCrouchGate(deltaY, {
+      crouching: crouchingRef.current,
+      enterFrames: crouchEnterFramesRef.current,
+    })
+    crouchingRef.current = crouchResult.crouching
+    crouchEnterFramesRef.current = crouchResult.enterFrames
+    const crouchChanged = crouchingRef.current !== wasCrouching
+
+    // Like lane position, crouch is a continuously refreshed held state.
+    onCrouchChangeRef.current(crouchingRef.current)
+
+    const jumpResult = updateJumpGate(
+      deltaY,
+      jumpGateRef.current,
+      crouchingRef.current,
+    )
+    jumpGateRef.current = {
+      armed: jumpResult.armed,
+      neutralFrames: jumpResult.neutralFrames,
     }
+    if (jumpResult.triggered) onJumpRef.current()
 
-    if (now - lastUiUpdateRef.current > 90 || action) {
+    const urgentUiUpdate = laneChanged || crouchChanged || jumpResult.triggered
+    if (urgentUiUpdate || now - lastUiUpdateRef.current > 66) {
       lastUiUpdateRef.current = now
-      setSignal({ x: deltaX, y: deltaY, confidence, action })
+      setMessage(
+        jumpResult.triggered
+          ? 'JUMP'
+          : crouchingRef.current
+            ? 'CROUCH'
+            : LANE_LABELS[nextLane],
+      )
+      setSignal({
+        x: deltaX,
+        y: deltaY,
+        confidence,
+        lane: nextLane,
+        crouching: crouchingRef.current,
+        jumpTriggered: jumpResult.triggered,
+      })
     }
-  }, [setStatus])
+  }, [publishTrackingLoss, setStatus])
 
   const poseLoop = useCallback(() => {
     const runFrame = () => {
       const detector = detectorRef.current
       const video = videoRef.current
       if (detector && video && video.readyState >= 2 && !video.paused) {
+        const now = performance.now()
         try {
-          const result = detector.detectForVideo(video, performance.now())
+          const result = detector.detectForVideo(video, now)
           const landmarks = result.landmarks[0] as Landmark[] | undefined
           drawPose(landmarks)
-          if (landmarks) interpretPose(landmarks, performance.now())
+          interpretPose(landmarks, now)
         } catch {
-          // A dropped inference frame should not stop gameplay or the camera loop.
+          publishTrackingLoss(0, now)
         }
       }
       frameRef.current = requestAnimationFrame(runFrame)
     }
     cancelAnimationFrame(frameRef.current)
     frameRef.current = requestAnimationFrame(runFrame)
-  }, [drawPose, interpretPose])
+  }, [drawPose, interpretPose, publishTrackingLoss])
 
   const createDetector = useCallback(async () => {
     const { FilesetResolver, PoseLandmarker } = await import('@mediapipe/tasks-vision')
@@ -259,7 +361,8 @@ export function usePoseControls({ onAction }: UsePoseControlsOptions) {
       video.muted = true
       video.playsInline = true
       await video.play()
-      smoothRef.current = null
+      filteredRef.current = null
+      unreliableFramesRef.current = 0
       setStatus('ready')
       setMessage('Camera ready — stand where your shoulders and hips are visible')
       poseLoop()
@@ -280,8 +383,13 @@ export function usePoseControls({ onAction }: UsePoseControlsOptions) {
   const calibrate = useCallback(() => {
     if (statusRef.current !== 'ready' && statusRef.current !== 'active') return
     baselineRef.current = null
-    smoothRef.current = null
+    filteredRef.current = null
+    laneRef.current = 1
+    crouchingRef.current = false
+    crouchEnterFramesRef.current = 0
+    jumpGateRef.current = { armed: true, neutralFrames: 0 }
     calibrationRef.current = { started: performance.now(), x: [], y: [] }
+    onCrouchChangeRef.current(false)
     setCalibrationProgress(0)
     setStatus('calibrating')
     setMessage('Hold your neutral running stance…')
@@ -294,12 +402,26 @@ export function usePoseControls({ onAction }: UsePoseControlsOptions) {
     detectorRef.current?.close()
     detectorRef.current = null
     baselineRef.current = null
+    filteredRef.current = null
     calibrationRef.current = null
+    laneRef.current = 1
+    crouchingRef.current = false
+    crouchEnterFramesRef.current = 0
+    jumpGateRef.current = { armed: true, neutralFrames: 0 }
+    unreliableFramesRef.current = 0
+    onCrouchChangeRef.current(false)
     const video = videoRef.current
     if (video) video.srcObject = null
     const canvas = canvasRef.current
     canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
-    setSignal({ x: 0, y: 0, confidence: 0, action: null })
+    setSignal({
+      x: 0,
+      y: 0,
+      confidence: 0,
+      lane: 1,
+      crouching: false,
+      jumpTriggered: false,
+    })
     setCalibrationProgress(0)
     setError(null)
     setMessage('Camera is off')

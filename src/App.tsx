@@ -29,6 +29,8 @@ import {
   Zap,
 } from 'lucide-react'
 import GameStage, { type GameStageHandle } from './components/GameStage'
+import { HORIZONTAL_SENSITIVITY } from './game/poseControlModel'
+import { loadHorizontalSensitivity, saveHorizontalSensitivity } from './game/settings'
 import type { ControlMode, GameSnapshot, GameStatus, RunnerAction, RunnerLane } from './game/types'
 import { usePoseControls } from './hooks/usePoseControls'
 
@@ -56,6 +58,7 @@ function App() {
   const [showHowTo, setShowHowTo] = useState(false)
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null)
   const [highScore, setHighScore] = useState(() => Number(localStorage.getItem('motion-rush-high-score') || 0))
+  const [horizontalSensitivity, setHorizontalSensitivity] = useState(loadHorizontalSensitivity)
 
   const playTone = useCallback((frequency: number, duration: number, type: OscillatorType = 'sine', volume = 0.04) => {
     if (muted) return
@@ -98,7 +101,12 @@ function App() {
     onLaneTarget: setCameraLane,
     onCrouchChange: setCameraCrouching,
     onJump: performCameraJump,
+    horizontalSensitivity,
   })
+
+  const updateHorizontalSensitivity = useCallback((value: number) => {
+    setHorizontalSensitivity(saveHorizontalSensitivity(value))
+  }, [])
 
   const onCoin = useCallback(() => {
     playTone(880, 0.085, 'sine', 0.035)
@@ -139,6 +147,7 @@ function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.repeat) return
+      if (event.target instanceof HTMLInputElement) return
       const actions: Record<string, RunnerAction | undefined> = {
         ArrowLeft: 'left', a: 'left', A: 'left',
         ArrowRight: 'right', d: 'right', D: 'right',
@@ -308,6 +317,28 @@ function App() {
                   <b>{['LEFT', 'CENTER', 'RIGHT'][pose.signal.lane]} · {Math.round(pose.signal.confidence * 100)}%</b>
                 )}
               </div>
+              <label className="sensitivity-control" htmlFor="horizontal-sensitivity">
+                <span className="sensitivity-head">
+                  <span>Horizontal Sensitivity</span>
+                  <output htmlFor="horizontal-sensitivity">{horizontalSensitivity.toFixed(2)}x</output>
+                </span>
+                <input
+                  id="horizontal-sensitivity"
+                  type="range"
+                  min={HORIZONTAL_SENSITIVITY.min}
+                  max={HORIZONTAL_SENSITIVITY.max}
+                  step={HORIZONTAL_SENSITIVITY.step}
+                  value={horizontalSensitivity}
+                  onInput={(event) => updateHorizontalSensitivity(Number(event.currentTarget.value))}
+                  aria-valuetext={`${horizontalSensitivity.toFixed(2)} times`}
+                  style={{
+                    '--sensitivity-fill': `${((horizontalSensitivity - HORIZONTAL_SENSITIVITY.min) / (HORIZONTAL_SENSITIVITY.max - HORIZONTAL_SENSITIVITY.min)) * 100}%`,
+                  } as CSSProperties}
+                />
+                <span className="sensitivity-scale" aria-hidden="true">
+                  <span>0.50x</span><span>1.00x</span><span>2.00x</span>
+                </span>
+              </label>
               {pose.error && <p className="camera-error">{pose.error}</p>}
               {(status === 'menu' || status === 'paused') && cameraButton.action && (
                 <button className="dock-action" onClick={() => cameraButton.action?.()}>

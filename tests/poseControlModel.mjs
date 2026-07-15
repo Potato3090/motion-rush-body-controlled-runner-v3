@@ -1,10 +1,54 @@
 import assert from 'node:assert/strict'
 import {
+  HORIZONTAL_SENSITIVITY,
   adaptivePoseSmooth,
+  applyHorizontalSensitivity,
+  normalizeHorizontalSensitivity,
   resolveAbsoluteLane,
   updateCrouchGate,
   updateJumpGate,
 } from '../.control-test-build/poseControlModel.js'
+
+// Fine-step sensitivity, clamping, center preservation, and shared processed
+// signal behavior for both the tracking dot and absolute lane model.
+assert.equal(normalizeHorizontalSensitivity(0.9), 0.9)
+assert.equal(normalizeHorizontalSensitivity(1.1), 1.1)
+assert.equal(normalizeHorizontalSensitivity(1.35), 1.35)
+assert.equal(normalizeHorizontalSensitivity(1.95), 1.95)
+assert.equal(normalizeHorizontalSensitivity(0.1), HORIZONTAL_SENSITIVITY.min)
+assert.equal(normalizeHorizontalSensitivity(4), HORIZONTAL_SENSITIVITY.max)
+assert.equal(applyHorizontalSensitivity(0, 2), 0)
+assert.equal(applyHorizontalSensitivity(0.04, 0.5), 0.02)
+assert.equal(applyHorizontalSensitivity(0.04, 1), 0.04)
+assert.equal(applyHorizontalSensitivity(0.04, 2), 0.08)
+assert.equal(applyHorizontalSensitivity(0.2, 2), HORIZONTAL_SENSITIVITY.maxProcessedOffset)
+assert.equal(applyHorizontalSensitivity(-0.2, 2), -HORIZONTAL_SENSITIVITY.maxProcessedOffset)
+assert.equal(resolveAbsoluteLane(applyHorizontalSensitivity(0.04, 0.5), 1), 1)
+assert.equal(resolveAbsoluteLane(applyHorizontalSensitivity(0.04, 2), 1), 2)
+assert.equal(resolveAbsoluteLane(applyHorizontalSensitivity(0.12, 0.5), 1), 2, 'minimum sensitivity must still reach the right lane')
+assert.equal(resolveAbsoluteLane(applyHorizontalSensitivity(-0.12, 0.5), 1), 0, 'minimum sensitivity must still reach the left lane')
+assert.equal(resolveAbsoluteLane(applyHorizontalSensitivity(-0.04, 2), 2), 0)
+assert.equal(resolveAbsoluteLane(applyHorizontalSensitivity(0.02, 2), 1), 1, 'high-sensitivity jitter must stay inside the center zone')
+
+// The local persistence adapter restores saved fine-step values and normalizes
+// invalid/out-of-range storage without affecting runtime availability.
+const fakeStorage = new Map()
+globalThis.localStorage = {
+  getItem: (key) => fakeStorage.has(key) ? fakeStorage.get(key) : null,
+  setItem: (key, value) => fakeStorage.set(key, String(value)),
+}
+const {
+  HORIZONTAL_SENSITIVITY_STORAGE_KEY,
+  loadHorizontalSensitivity,
+  saveHorizontalSensitivity,
+} = await import('../.control-test-build/settings.js')
+assert.equal(loadHorizontalSensitivity(), 1)
+assert.equal(saveHorizontalSensitivity(1.35), 1.35)
+assert.equal(fakeStorage.get(HORIZONTAL_SENSITIVITY_STORAGE_KEY), '1.35')
+assert.equal(loadHorizontalSensitivity(), 1.35)
+fakeStorage.set(HORIZONTAL_SENSITIVITY_STORAGE_KEY, '99')
+assert.equal(loadHorizontalSensitivity(), 2)
+delete globalThis.localStorage
 
 // Absolute lane selection, including direct opposite-side retargeting.
 assert.equal(resolveAbsoluteLane(0, 1), 1)

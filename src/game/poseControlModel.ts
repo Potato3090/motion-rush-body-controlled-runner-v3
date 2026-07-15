@@ -11,6 +11,14 @@ export const POSE_TUNING = {
   jumpNeutralFrames: 2,
 } as const
 
+export const HORIZONTAL_SENSITIVITY = {
+  min: 0.5,
+  max: 2,
+  step: 0.05,
+  default: 1,
+  maxProcessedOffset: 0.1,
+} as const
+
 export interface JumpGateState {
   armed: boolean
   neutralFrames: number
@@ -23,6 +31,28 @@ export interface JumpGateResult extends JumpGateState {
 export interface CrouchGateState {
   crouching: boolean
   enterFrames: number
+}
+
+export function normalizeHorizontalSensitivity(value: number): number {
+  if (!Number.isFinite(value)) return HORIZONTAL_SENSITIVITY.default
+  const clamped = Math.max(HORIZONTAL_SENSITIVITY.min, Math.min(HORIZONTAL_SENSITIVITY.max, value))
+  const stepped = Math.round(clamped / HORIZONTAL_SENSITIVITY.step) * HORIZONTAL_SENSITIVITY.step
+  return Number(stepped.toFixed(2))
+}
+
+/**
+ * Applies user sensitivity around the calibrated zero point and constrains the
+ * shared UI/game signal to the physical tracking bar's valid range.
+ */
+export function applyHorizontalSensitivity(
+  rawHorizontalOffset: number,
+  sensitivity: number,
+): number {
+  const processed = rawHorizontalOffset * normalizeHorizontalSensitivity(sensitivity)
+  return Math.max(
+    -HORIZONTAL_SENSITIVITY.maxProcessedOffset,
+    Math.min(HORIZONTAL_SENSITIVITY.maxProcessedOffset, processed),
+  )
 }
 
 /**

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PoseLandmarker as PoseLandmarkerInstance } from '@mediapipe/tasks-vision'
 import {
   adaptivePoseSmooth,
+  applyHorizontalSensitivity,
+  normalizeHorizontalSensitivity,
   resolveAbsoluteLane,
   updateCrouchGate,
   updateJumpGate,
@@ -22,6 +24,7 @@ interface UsePoseControlsOptions {
   onLaneTarget: (lane: RunnerLane) => void
   onCrouchChange: (crouching: boolean) => void
   onJump: () => void
+  horizontalSensitivity: number
 }
 
 const WASM_ROOT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
@@ -46,6 +49,7 @@ export function usePoseControls({
   onLaneTarget,
   onCrouchChange,
   onJump,
+  horizontalSensitivity,
 }: UsePoseControlsOptions) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -65,6 +69,11 @@ export function usePoseControls({
   const onLaneTargetRef = useRef(onLaneTarget)
   const onCrouchChangeRef = useRef(onCrouchChange)
   const onJumpRef = useRef(onJump)
+  const horizontalSensitivityRef = useRef(normalizeHorizontalSensitivity(horizontalSensitivity))
+
+  // Update synchronously during render so a live slider change reaches the
+  // very next camera frame without recalibration or an effect-cycle delay.
+  horizontalSensitivityRef.current = normalizeHorizontalSensitivity(horizontalSensitivity)
 
   const [status, setStatusState] = useState<CameraStatus>('off')
   const [message, setMessage] = useState('Camera is off')
@@ -233,7 +242,11 @@ export function usePoseControls({
     const baseline = baselineRef.current
     if (statusRef.current !== 'active' || !baseline) return
 
-    const deltaX = filtered.x - baseline.centerX
+    const rawDeltaX = filtered.x - baseline.centerX
+    const deltaX = applyHorizontalSensitivity(
+      rawDeltaX,
+      horizontalSensitivityRef.current,
+    )
     const deltaY = filtered.y - baseline.shoulderY
     const previousLane = laneRef.current
     const nextLane = resolveAbsoluteLane(deltaX, previousLane)

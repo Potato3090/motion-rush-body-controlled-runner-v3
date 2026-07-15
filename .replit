@@ -1,0 +1,12 @@
+entrypoint = "src/main.tsx"
+run = "npm run dev -- --host 0.0.0.0 --port 3000"
+modules = ["nodejs-20"]
+
+[deployment]
+build = "npm run build"
+run = "npm run start"
+deploymentTarget = "autoscale"
+
+[[ports]]
+localPort = 3000
+externalPort = 80

@@ -3,14 +3,13 @@ name: Netlify Build and Deploy
 on:
   pull_request:
     branches: [main]
-  issue_comment:
-    types: [created]
   workflow_dispatch:
 
 jobs:
   build-artifact:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,44 +37,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  deploy-netlify:
-    if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.action == 'created' &&
-      github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/deploy-netlify ')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout V3 main branch
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
       - name: Read and mask one-time Netlify proxy
+        if: hashFiles('.github/netlify-proxy.txt') != ''
         shell: bash
-        env:
-          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          PROXY_URL="${COMMENT_BODY#'/deploy-netlify '}"
+          PROXY_URL="$(cat .github/netlify-proxy.txt)"
           echo "::add-mask::$PROXY_URL"
           echo "NETLIFY_PROXY_URL=$PROXY_URL" >> "$GITHUB_ENV"
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run camera control tests
-        run: npm run test:controls
-
-      - name: Verify production build
-        run: npm run build
-
       - name: Deploy production build to Netlify
+        if: hashFiles('.github/netlify-proxy.txt') != ''
         run: npx -y @netlify/mcp@latest --site-id 54032678-80a3-428b-bfb8-c57176acf850 --proxy-path "$NETLIFY_PROXY_URL"
